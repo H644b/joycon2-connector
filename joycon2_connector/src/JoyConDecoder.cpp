@@ -1,9 +1,6 @@
 #include "JoyConDecoder.h"
 #include <cmath>
 #include <algorithm>
-#include <ViGEm/Client.h>
-#include <ViGEm/Common.h>
-
 #include <cstdint>
 #include <cstdio>
 #include <vector>

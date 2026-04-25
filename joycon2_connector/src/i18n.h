@@ -3,7 +3,10 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#ifdef _WIN32
+#define NOMINMAX
 #include <Windows.h>
+#endif
 #include "lang_data.h"
 
 // Information about an available language
@@ -188,12 +191,23 @@ private:
 
 // Detect system UI language: returns locale string
 inline std::string DetectSystemLanguage() {
+#ifdef _WIN32
     LANGID langId = GetUserDefaultUILanguage();
     WORD primaryLang = PRIMARYLANGID(langId);
-    if (primaryLang == LANG_CHINESE) {
-        return "zh_cn";
+    if (primaryLang == LANG_CHINESE) return "zh_cn";
+    return "en_us";
+#else
+    // Check LANG and LANGUAGE environment variables
+    const char* lang = getenv("LANGUAGE");
+    if (!lang || lang[0] == '\0') lang = getenv("LANG");
+    if (lang) {
+        std::string l(lang);
+        // Lowercase and check prefix
+        for (char& c : l) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (l.rfind("zh", 0) == 0) return "zh_cn";
     }
     return "en_us";
+#endif
 }
 
 // Global translation function — signature unchanged, all call sites work as before

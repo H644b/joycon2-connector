@@ -1,6 +1,6 @@
 #pragma once
 // UpdateChecker - Async GitHub release version checker (non-blocking)
-// Uses WinRT Windows.Web.Http for network requests with timeout handling.
+// Uses libcurl for cross-platform HTTP.
 
 #include <string>
 #include <thread>
@@ -8,12 +8,7 @@
 #include <mutex>
 #include <sstream>
 #include <chrono>
-#include <shellapi.h>
-
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Web.Http.h>
-#include <winrt/Windows.Web.Http.Headers.h>
-#include <winrt/Windows.Storage.Streams.h>
+#include <curl/curl.h>
 
 #include "version.h"
 
@@ -35,120 +30,19 @@ public:
     // Launch async check (non-blocking, runs on background thread)
     void CheckForUpdate() {
         UpdateState expected = UpdateState::Checking;
-        if (state_.load() == expected) return;  // already checking
-
-        state_.store(UpdateState::Checking);
-        manualCheck_ = true;
-
-        std::thread([this]() {
-            try {
-                // Create HTTP client with timeout
-                winrt::Windows::Web::Http::HttpClient client;
-                auto headers = client.DefaultRequestHeaders();
-                headers.UserAgent().TryParseAdd(L"joycon2-connector");
-
-                winrt::Windows::Foundation::Uri uri(L"https://api.github.com/repos/Misaka10571/joycon2-connector/releases/latest");
-
-                // Send GET request with timeout (10 seconds)
-                auto asyncOp = client.GetStringAsync(uri);
-
-                // Wait with timeout using std::future-like approach
-                auto status = asyncOp.wait_for(std::chrono::seconds(10));
-                if (status != winrt::Windows::Foundation::AsyncStatus::Completed) {
-                    // Timed out or error — cancel the operation
-                    asyncOp.Cancel();
-                    state_.store(UpdateState::Error);
-                    return;
-                }
-
-                winrt::hstring responseBody = asyncOp.GetResults();
-                std::string json = winrt::to_string(responseBody);
-
-                // Extract "tag_name" from JSON response
-                std::string tagName = ExtractTagName(json);
-                if (tagName.empty()) {
-                    state_.store(UpdateState::Error);
-                    return;
-                }
-
-                // Strip leading 'v' or 'V' if present
-                if (!tagName.empty() && (tagName[0] == 'v' || tagName[0] == 'V')) {
-                    tagName = tagName.substr(1);
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    latestVersion_ = tagName;
-                }
-
-                // Compare versions
-                if (IsNewerVersion(tagName)) {
-                    state_.store(UpdateState::UpdateAvailable);
-                    showPopup_ = true;
-                } else {
-                    state_.store(UpdateState::UpToDate);
-                }
-
-            } catch (...) {
-                // Any exception (network error, WinRT error, etc.)
-                state_.store(UpdateState::Error);
-            }
-        }).detach();
-    }
-
-    // Launch check silently (for auto-check on startup — only shows popup if update found)
-    void CheckForUpdateSilent() {
-        manualCheck_ = false;
-        UpdateState expected = UpdateState::Checking;
         if (state_.load() == expected) return;
 
         state_.store(UpdateState::Checking);
+        manualCheck_ = true;
+        std::thread([this]() { DoCheck(false); }).detach();
+    }
 
-        std::thread([this]() {
-            try {
-                winrt::Windows::Web::Http::HttpClient client;
-                auto headers = client.DefaultRequestHeaders();
-                headers.UserAgent().TryParseAdd(L"joycon2-connector");
-
-                winrt::Windows::Foundation::Uri uri(L"https://api.github.com/repos/Misaka10571/joycon2-connector/releases/latest");
-
-                auto asyncOp = client.GetStringAsync(uri);
-                auto status = asyncOp.wait_for(std::chrono::seconds(10));
-                if (status != winrt::Windows::Foundation::AsyncStatus::Completed) {
-                    asyncOp.Cancel();
-                    state_.store(UpdateState::Idle);  // Silent fail
-                    return;
-                }
-
-                winrt::hstring responseBody = asyncOp.GetResults();
-                std::string json = winrt::to_string(responseBody);
-
-                std::string tagName = ExtractTagName(json);
-                if (tagName.empty()) {
-                    state_.store(UpdateState::Idle);
-                    return;
-                }
-
-                if (!tagName.empty() && (tagName[0] == 'v' || tagName[0] == 'V')) {
-                    tagName = tagName.substr(1);
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    latestVersion_ = tagName;
-                }
-
-                if (IsNewerVersion(tagName)) {
-                    state_.store(UpdateState::UpdateAvailable);
-                    showPopup_ = true;
-                } else {
-                    state_.store(UpdateState::Idle);  // Silent — don't show "up to date"
-                }
-
-            } catch (...) {
-                state_.store(UpdateState::Idle);  // Silent fail on auto-check
-            }
-        }).detach();
+    // Launch check silently (for auto-check on startup)
+    void CheckForUpdateSilent() {
+        manualCheck_ = false;
+        if (state_.load() == UpdateState::Checking) return;
+        state_.store(UpdateState::Checking);
+        std::thread([this]() { DoCheck(true); }).detach();
     }
 
     UpdateState GetState() const { return state_.load(); }
@@ -165,9 +59,15 @@ public:
     void PopupShown() { showPopup_ = false; }
 
     void OpenReleasePage() {
+#ifdef _WIN32
         ShellExecuteW(nullptr, L"open",
             L"https://github.com/Misaka10571/joycon2-connector/releases/latest",
             nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+        system("open https://github.com/Misaka10571/joycon2-connector/releases/latest");
+#else
+        system("xdg-open https://github.com/Misaka10571/joycon2-connector/releases/latest");
+#endif
     }
 
 private:
@@ -178,6 +78,56 @@ private:
     std::string latestVersion_;
     std::atomic<bool> showPopup_{ false };
     std::atomic<bool> manualCheck_{ false };
+
+    // libcurl write callback — appends received data to a std::string
+    static size_t CurlWriteCB(char* ptr, size_t size, size_t nmemb, void* userdata) {
+        auto* buf = static_cast<std::string*>(userdata);
+        buf->append(ptr, size * nmemb);
+        return size * nmemb;
+    }
+
+    // Fetch URL via libcurl; returns body or empty string on error
+    static std::string FetchURL(const std::string& url) {
+        CURL* curl = curl_easy_init();
+        if (!curl) return {};
+        std::string body;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "joycon2-connector");
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCB);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK) return {};
+        return body;
+    }
+
+    void DoCheck(bool silent) {
+        std::string json = FetchURL("https://api.github.com/repos/Misaka10571/joycon2-connector/releases/latest");
+        if (json.empty()) {
+            state_.store(silent ? UpdateState::Idle : UpdateState::Error);
+            return;
+        }
+        std::string tagName = ExtractTagName(json);
+        if (tagName.empty()) {
+            state_.store(silent ? UpdateState::Idle : UpdateState::Error);
+            return;
+        }
+        if (!tagName.empty() && (tagName[0] == 'v' || tagName[0] == 'V'))
+            tagName = tagName.substr(1);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            latestVersion_ = tagName;
+        }
+        if (IsNewerVersion(tagName)) {
+            state_.store(UpdateState::UpdateAvailable);
+            showPopup_ = true;
+        } else {
+            state_.store(silent ? UpdateState::Idle : UpdateState::UpToDate);
+        }
+    }
 
     // Extract "tag_name" value from GitHub API JSON response
     static std::string ExtractTagName(const std::string& json) {
