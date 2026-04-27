@@ -1,11 +1,11 @@
 #include "JoyConDecoder.h"
 #include <cmath>
 #include <algorithm>
-#include <ViGEm/Client.h>
-#include <ViGEm/Common.h>
+#include "GamepadReport.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include <algorithm> // for clamp
 

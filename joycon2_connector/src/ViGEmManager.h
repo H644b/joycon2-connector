@@ -1,5 +1,8 @@
 #pragma once
-// ViGEm Manager - Singleton wrapping ViGEm client lifecycle
+// ViGEm Manager - Singleton wrapping ViGEm client lifecycle (Windows only)
+
+#ifdef _WIN32
+
 #include <ViGEm/Client.h>
 #include <ViGEm/Common.h>
 #include <iostream>
@@ -45,26 +48,6 @@ public:
     bool IsConnected() const { return connected; }
     PVIGEM_CLIENT GetClient() const { return client; }
 
-    PVIGEM_TARGET AllocDS4() {
-        return vigem_target_ds4_alloc();
-    }
-
-    PVIGEM_TARGET AllocX360() {
-        return vigem_target_x360_alloc();
-    }
-
-    bool AddTarget(PVIGEM_TARGET target) {
-        if (!client) return false;
-        return VIGEM_SUCCESS(vigem_target_add(client, target));
-    }
-
-    void RemoveTarget(PVIGEM_TARGET target) {
-        if (client && target) {
-            vigem_target_remove(client, target);
-            vigem_target_free(target);
-        }
-    }
-
     ~ViGEmManager() {
         Shutdown();
     }
@@ -74,3 +57,21 @@ private:
     PVIGEM_CLIENT client = nullptr;
     std::atomic<bool> connected{ false };
 };
+
+// Helper used by VirtualController.h's ViGEmController
+inline PVIGEM_CLIENT _GetViGEmClient() {
+    return ViGEmManager::Instance().GetClient();
+}
+
+#else // non-Windows stub
+
+class ViGEmManager {
+public:
+    static ViGEmManager& Instance() { static ViGEmManager inst; return inst; }
+    bool Initialize() { return false; }
+    void Shutdown()   {}
+    bool IsConnected() const { return false; }
+};
+
+#endif // _WIN32
+

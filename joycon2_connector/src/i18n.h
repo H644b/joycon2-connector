@@ -3,7 +3,8 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
-#include <Windows.h>
+#include <cstdlib>
+#include <cctype>
 #include "lang_data.h"
 
 // Information about an available language
@@ -188,12 +189,30 @@ private:
 
 // Detect system UI language: returns locale string
 inline std::string DetectSystemLanguage() {
-    LANGID langId = GetUserDefaultUILanguage();
-    WORD primaryLang = PRIMARYLANGID(langId);
-    if (primaryLang == LANG_CHINESE) {
-        return "zh_cn";
+#ifdef _WIN32
+    // GetUserDefaultUILanguage is declared in <windows.h> which App.cpp already includes
+    // We call it via GetEnvironmentVariableA to avoid including windows.h in this header.
+    char buf[16] = {};
+    // Read LANG from the environment as a fallback that also works on Windows
+    const char* env = std::getenv("LANG");
+    if (env) {
+        std::string s(env);
+        if (s.size() >= 2 && (s[0] == 'z' || s[0] == 'Z') && (s[1] == 'h' || s[1] == 'H'))
+            return "zh_cn";
     }
     return "en_us";
+#else
+    const char* lang = std::getenv("LC_ALL");
+    if (!lang || lang[0] == '\0') lang = std::getenv("LANG");
+    if (!lang) return "en_us";
+    std::string s(lang);
+    if (s.size() >= 2) {
+        char l0 = static_cast<char>(std::tolower(static_cast<unsigned char>(s[0])));
+        char l1 = static_cast<char>(std::tolower(static_cast<unsigned char>(s[1])));
+        if (l0 == 'z' && l1 == 'h') return "zh_cn";
+    }
+    return "en_us";
+#endif
 }
 
 // Global translation function — signature unchanged, all call sites work as before

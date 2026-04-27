@@ -2,8 +2,7 @@
 #include <vector>
 #include <utility>
 #include <cstdint>
-#include <Windows.h>
-#include <ViGEm/Client.h>
+#include "GamepadReport.h"
 
 enum class JoyConSide { Left, Right };
 enum class JoyConOrientation { Upright, Sideways };
